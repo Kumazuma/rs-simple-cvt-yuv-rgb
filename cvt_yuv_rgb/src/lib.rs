@@ -69,10 +69,12 @@ struct Plane<'a>{
 impl<'a> Plane<'a>{
     fn row<T:Sized>(&self, at:usize)->&[T]{
         let start = at * self.stride as usize;
+        let end =  (at + 1) * self.stride as usize;
         unsafe{
-            let len = self.data[start..].len();
+            let row = &self.data[start..end];
+            let len = row.len();
             let len = len / (std::mem::size_of::<T>()/std::mem::size_of::<u8>());
-            &std::mem::transmute::<_,&[T]>(&self.data[start..])[0..len]
+            &std::mem::transmute::<_,&[T]>(row)[0..len]
         }
     }
 }
@@ -125,11 +127,12 @@ impl<'b, 'a:'b> Iterator for YUVImageIter<'b, 'a>{
                 self.reader.plane_v.row::<u16>(row>>shift_y)[col>>shift_x] as f32)
             }
             else{
-                (self.reader.plane_y.row::<u8>(row)[col] as f32,
+                (
+                self.reader.plane_y.row::<u8>(row)[col] as f32,
                 self.reader.plane_u.row::<u8>(row>>shift_y)[col>>shift_x] as f32,
                 self.reader.plane_v.row::<u8>(row>>shift_y)[col>>shift_x] as f32)
             };
-            let cy = y / depth - 0.5;
+            let cy = y / depth ;
             let cu = u / depth - 0.5;
             let cv = v / depth - 0.5;
             Some(YUV::new(cy,cu,cv))
@@ -216,10 +219,10 @@ impl<'a> YUVImageBuilder<'a>{
 
 pub struct YUV2RGB<Reader:Iterator<Item=YUV>>{
     yuv_reader:Reader,
-    color_primary:&'static color_primaries::ColorPrimary
+    color_primary:color_primaries::ColorPrimary
 }
 impl<Reader:Iterator<Item=YUV>> YUV2RGB<Reader>{
-    pub fn new(reader:Reader, color_primary:&'static color_primaries::ColorPrimary)->Self{
+    pub fn new(reader:Reader, color_primary:color_primaries::ColorPrimary)->Self{
         Self{
             yuv_reader:reader,
             color_primary:color_primary
@@ -286,6 +289,19 @@ where Reader:Iterator<Item=RGB>{
             rgb:_2rgb,
             depth:8u8
         }
+    }
+}
+impl<Reader> Iterator for RGB24Writer<Reader>
+where Reader:Iterator<Item=RGB>{
+    type Item = [u8;3];
+    fn next(&mut self)->Option<Self::Item>{
+        let max_bits=(1u32 << self.depth) - 1;
+        let max = max_bits as f32;
+        let rgb = self.rgb.next()?;
+        let r = (rgb.r * max) as u8;
+        let g = (rgb.g * max) as u8;
+        let b = (rgb.b * max) as u8;
+        return Some([r,g,b]);
     }
 }
 impl<Reader> std::io::Read for RGB24Writer<Reader>
