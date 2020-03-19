@@ -5,6 +5,8 @@ mod tests {
         assert_eq!(2 + 2, 4);
     }
 }
+use std::u16;
+use std::u32;
 pub mod color_primaries{
     pub const BT601:ColorPrimary=ColorPrimary{kr:0.299,kg:0.587, kb:0.114}; 
     pub const BT709:ColorPrimary=ColorPrimary{kr:0.2126,kg:0.7152, kb:0.0722}; 
@@ -436,12 +438,17 @@ impl<'a> RGB32ImageBuilder<'a>{
         self
     }
     pub fn build(self)->RGB32Image<'a>{
+        let data =self.data.expect("data missing");
+        let width= self.width.expect("width missing");
+        let height=self.height.expect("height missing");
+        let stride=self.stride.expect("stride missing");
+        let depth=self.depth.expect("depth missing");
         RGB32Image{
-            data:self.data.expect("data missing"),
-            width:self.width.expect("width missing"),
-            height:self.height.expect("height missing"),
-            stride:self.stride.expect("stride missing"),
-            depth:self.depth.expect("depth missing")
+            data:data,
+            width:width,
+            height:height,
+            stride:stride,
+            depth:depth
         }
     }
 }
@@ -484,8 +491,7 @@ impl<'a:'b, 'b> Iterator for RGB32ImageIter<'a,'b>{
         let width_at = now_index % self.image.width ;
         let stride = self.image.stride;
         let row = &self.image.data[height_at * stride .. (height_at + 1) * stride];
-        let _4bytes = &row[width_at * 4 .. (width_at + 1)*4];
-        let _4bytes =unsafe{ std::mem::transmute::<_, u32>([_4bytes[0],_4bytes[1],_4bytes[2],_4bytes[3]])};
+        let _4bytes = std::u32::from_le_bytes(row[width_at * 4 .. (width_at + 1)*4]);
         let depth = self.image.depth;
         let r = (_4bytes >> (32 - depth*1)) & max_bits;
         let g = (_4bytes >> (32 - depth*2)) & max_bits;
@@ -496,4 +502,64 @@ impl<'a:'b, 'b> Iterator for RGB32ImageIter<'a,'b>{
         let rgb = RGB::new(r,g,b);
         return Some(rgb);
     }
+}
+pub struct RGB48Writer<Reader>
+where Reader:Iterator<Item=RGB>{
+    rgb:Reader,
+    depth:u8,
+    max:f32,
+    max_bits:u32
+}
+
+fn cvt_to_slice(val:u16)->[u8;2]{
+    val.to_be_bytes()
+}
+impl<Reader> RGB48Writer<Reader>
+where Reader:Iterator<Item=RGB>{
+    pub fn new(reader:Reader, depth:u8)->Self{
+        let max_bits=(1u32 << depth) - 1;
+        let max = max_bits as f32;
+        Self{
+            rgb:reader,
+            depth:depth,
+            max:max,
+            max_bits:max_bits
+        }
+    }
+    fn get(&self, rgb:RGB)->[u8;6]{
+        let max = self.max;
+        let r:[u8;2] = cvt_to_slice((rgb.r * max) as u16);
+        let g:[u8;2] = cvt_to_slice((rgb.g * max) as u16);
+        let b:[u8;2] = cvt_to_slice((rgb.b * max) as u16);
+        return [r[0], r[1],g[0],g[1],b[0],b[1]];
+    }
+}
+impl<Reader> Iterator for RGB48Writer<Reader>
+where Reader:Iterator<Item=RGB>{
+    type Item = [u8;6];
+    fn next(&mut self)->Option<Self::Item>{
+        let rgb = self.rgb.next()?;
+        return Some(self.get(rgb));
+    }
+}
+impl<Reader> std::io::Read for RGB48Writer<Reader>
+where Reader:Iterator<Item=RGB>{
+    fn read(&mut self, buf:&mut [u8])->Result<usize, std::io::Error>{
+        let mut offset = 0usize;
+
+        while buf.len() - offset >= 6{
+            match self.rgb.next(){
+                None if offset == 0 =>return Err(std::io::Error::from(std::io::ErrorKind::WriteZero)),
+                None if offset != 0 =>return Ok(offset),
+                Some(rgb)=>{
+                    let rgb = self.get(rgb);
+                    buf[offset..offset+6].copy_from_slice(&rgb);
+                    offset += 6;
+                }
+                _=>unreachable!()
+            }    
+        }
+        return Ok(offset);
+    }
+    
 }
