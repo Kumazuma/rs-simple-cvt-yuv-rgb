@@ -64,19 +64,37 @@ impl RGB{
     }
 }
 impl Copy for RGB {}
-struct Plane<'a>{
-    data:&'a[u8],
-    stride:u32
+enum Plane<'a>{
+    RefMut{data:&'a mut [u8], stride:u32},
+    Ref{data:&'a [u8], stride:u32}
 }
 impl<'a> Plane<'a>{
     fn row<T:Sized>(&self, at:usize)->&[T]{
-        let start = at * self.stride as usize;
-        let end =  (at + 1) * self.stride as usize;
+        let (data, stride) = match self{
+            Plane::Ref{data,stride}=>(*data, *stride),
+            Plane::RefMut{data, stride}=>(*data as &[u8],*stride)
+        };
+        let start = at * stride as usize;
+        let end =  (at + 1) * stride as usize;
         unsafe{
-            let row = &self.data[start..end];
+            let row = &data[start..end];
             let len = row.len();
             let len = len / (std::mem::size_of::<T>()/std::mem::size_of::<u8>());
             &std::mem::transmute::<_,&[T]>(row)[0..len]
+        }
+    }
+    fn row_mut<T>(&mut self, at:usize)->Option<&mut [T]>{
+        let (data, stride) = match  self{
+            Plane::Ref{..}=>return None,
+            Plane::RefMut{data, stride}=>(data as &mut [u8],*stride)
+        };
+        let start = at * stride as usize;
+        let end =  (at + 1) * stride as usize;
+        unsafe{
+            let row = &mut data[start..end];
+            let len = row.len();
+            let len = len / (std::mem::size_of::<T>()/std::mem::size_of::<u8>());
+            Some(&mut std::mem::transmute::<_,&mut [T]>(row)[0..len])
         }
     }
 }
@@ -94,6 +112,66 @@ pub struct YUVImage<'a>
 impl<'a> YUVImage<'a>{
     pub fn iter(&self)->YUVImageIter<'_, 'a>{
         YUVImageIter::new(self)
+    }
+    pub fn write_yuv<Read:Iterator<Item=YUV>>(&mut self,mut reader: Read)->bool{
+        for i in 0..self.height as usize{
+            let row_y = self.plane_y.row_mut(i);
+            let row_u = self.plane_u.row_mut(i << self.chroma_shift_y);
+            let row_v = self.plane_v.row_mut(i << self.chroma_shift_y);
+            let (row_y, row_u, row_v) = match (row_y, row_u, row_v){
+                (Some(y), Some(u), Some(v))=>{
+                    u.iter_mut().for_each(|item| *item = 0u8);
+                    v.iter_mut().for_each(|item| *item = 0u8);
+                    y.iter_mut().for_each(|item| *item = 0u8);
+                    (y, u, v)
+                },
+                _=>return false
+            };
+            let max_bits=(1 << self.depth) - 1;
+            let max = max_bits as f32;
+            for j in 0..self.width as usize{
+                let yuv = match reader.next(){
+                    Some(yuv)=>yuv,
+                    None=>return false
+                };
+                let u = j << self.chroma_shift_x;
+                let v = j << self.chroma_shift_x;
+                row_y[j] = (yuv.y * max) as u8;
+                row_u[u] += (yuv.v * max) as  u8 / 2;
+                row_v[v] += (yuv.u * max) as  u8 / 2;
+            }
+        }
+        return true;
+    }
+    pub fn write_yuv16<Read:Iterator<Item=YUV>>(&mut self,mut reader: Read)->bool{
+        for i in 0..self.height as usize{
+            let row_y = self.plane_y.row_mut(i);
+            let row_u = self.plane_u.row_mut(i << self.chroma_shift_y);
+            let row_v = self.plane_v.row_mut(i << self.chroma_shift_y);
+            let (row_y, row_u, row_v) = match (row_y, row_u, row_v){
+                (Some(y), Some(u), Some(v))=>{
+                    u.iter_mut().for_each(|item| *item = 0u16);
+                    v.iter_mut().for_each(|item| *item = 0u16);
+                    y.iter_mut().for_each(|item| *item = 0u16);
+                    (y, u, v)
+                },
+                _=>return false
+            };
+            let max_bits=(1 << self.depth) - 1;
+            let max = max_bits as f32;
+            for j in 0..self.width as usize{
+                let yuv = match reader.next(){
+                    Some(yuv)=>yuv,
+                    None=>return false
+                };
+                let u = j << self.chroma_shift_x;
+                let v = j << self.chroma_shift_x;
+                row_y[j] = (yuv.y * max) as u16;
+                row_u[u] += (yuv.v * max) as  u16 / 2;
+                row_v[v] += (yuv.u * max) as  u16 / 2;
+            }
+        }
+        return true;
     }
 } 
 pub struct YUVImageIter<'b, 'a:'b>{
@@ -165,21 +243,43 @@ impl<'a> YUVImageBuilder<'a>{
         }
     }
     pub fn plane_y(mut self, data:&'a[u8], stride:u32)->Self{
-        self.plane_y =Some(Plane{
+        self.plane_y =Some(Plane::Ref{
             data:data,
             stride:stride
         });
         return self;
     }
+
     pub fn plane_u(mut self, data:&'a[u8], stride:u32)->Self{
-        self.plane_u =Some(Plane{
+        self.plane_u =Some(Plane::Ref{
             data:data,
             stride:stride
         });
         return self;
     }
     pub fn plane_v(mut self, data:&'a[u8], stride:u32)->Self{
-        self.plane_v =Some(Plane{
+        self.plane_v =Some(Plane::Ref{
+            data:data,
+            stride:stride
+        });
+        return self;
+    }
+    pub fn plane_u_mut(mut self, data:&'a mut [u8], stride:u32)->Self{
+        self.plane_u =Some(Plane::RefMut{
+            data:data,
+            stride:stride
+        });
+        return self;
+    }
+    pub fn plane_v_mut(mut self, data:&'a mut [u8], stride:u32)->Self{
+        self.plane_v =Some(Plane::RefMut{
+            data:data,
+            stride:stride
+        });
+        return self;
+    }
+    pub fn plane_y_mut(mut self, data:&'a mut [u8], stride:u32)->Self{
+        self.plane_y =Some(Plane::RefMut{
             data:data,
             stride:stride
         });
@@ -491,7 +591,8 @@ impl<'a:'b, 'b> Iterator for RGB32ImageIter<'a,'b>{
         let width_at = now_index % self.image.width ;
         let stride = self.image.stride;
         let row = &self.image.data[height_at * stride .. (height_at + 1) * stride];
-        let _4bytes = std::u32::from_le_bytes(row[width_at * 4 .. (width_at + 1)*4]);
+        let _4bytes:*const u32 = row[width_at * 4 .. (width_at + 1)*4].as_ptr() as *const u32;
+        let _4bytes:u32 = unsafe{*_4bytes};
         let depth = self.image.depth;
         let r = (_4bytes >> (32 - depth*1)) & max_bits;
         let g = (_4bytes >> (32 - depth*2)) & max_bits;
@@ -562,4 +663,38 @@ where Reader:Iterator<Item=RGB>{
         return Ok(offset);
     }
     
+}
+use std::io::Read;
+struct RGB24Reader<T:Read>{
+    data:T
+}
+impl<T:Read> RGB24Reader<T>{
+    fn new(data:T)->Self{
+        Self{
+            data:data
+        }
+    }
+}
+impl<T:Read> Iterator for RGB24Reader<T>{
+    type Item = RGB;
+    fn next(&mut self)->Option<Self::Item>{
+        let mut rgb_bytes = [0u8;3];
+        let mut total_read_count = 0;
+        while let Ok(read_count) = self.data.read(&mut rgb_bytes[total_read_count..]){
+            total_read_count += read_count;
+            if read_count == 0 || total_read_count == 3{
+                break;
+            }
+        }
+        return if total_read_count != 3{
+            None
+        }
+        else{
+            let r = rgb_bytes[0] as f32 / 255f32;
+            let g = rgb_bytes[1] as f32 / 255f32;
+            let b = rgb_bytes[2] as f32 / 255f32;
+            let rgb = RGB::new(r,g,b);
+            Some(rgb)
+        };
+    }
 }
