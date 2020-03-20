@@ -117,7 +117,7 @@ pub struct YUVImage<'a>
     height:u32,
     depth:u32
 }
-pub trait YUVCompatiable{
+pub trait YuvCompatible{
     fn y_row(&self, at:usize)->&[u8];
     fn y_row_mut(&mut self, at:usize)->&mut [u8];
     fn u_row(&self, at:usize)->&[u8];
@@ -129,8 +129,45 @@ pub trait YUVCompatiable{
     fn depth(&self)->u8;
     fn width(&self)->usize;
     fn height(&self)->usize;
+    fn write_y(&mut self, row:usize, col:usize, value:u8){
+        let row_y = self.y_row_mut(row);
+        row_y[col] = value;
+    }
+    fn write_u(&mut self, row:usize, col:usize, value:u8){
+        let row = row >> self.chroma_shift_y();
+        let col = col >> self.chroma_shift_x();
+        let row_u = self.u_row_mut(row);
+        row_u[col] = value /2;
+    }
+    fn write_v(&mut self, row:usize, col:usize, value:u8){
+        let row = row >> self.chroma_shift_y();
+        let col = col >> self.chroma_shift_x();
+        let row_v = self.v_row_mut(row);
+        row_v[col] += value /2;
+    }
+    fn write_yuv(&mut self,reader:&mut dyn Iterator<Item=YUV>)->bool{
+        for i in 0..self.height() as usize{
+            
+            self.y_row_mut(i).iter_mut().for_each(|item|*item=0u8);
+            self.u_row_mut(i >> self.chroma_shift_y()).iter_mut().for_each(|item|*item=0u8);
+            self.v_row_mut(i >> self.chroma_shift_y()).iter_mut().for_each(|item|*item=0u8);
+
+            let max_bits=(1 << self.depth()) - 1;
+            let max = max_bits as f32;
+            for j in 0..self.width() as usize{
+                let yuv = match reader.next(){
+                    Some(yuv)=>yuv,
+                    None=>return false
+                };
+                self.write_y(i, j, (yuv.y * max) as u8);
+                self.write_u(i, j, (yuv.u * max) as u8);
+                self.write_v(i, j, (yuv.v * max) as u8);
+            }
+        }
+        return true;
+    }
 }
-impl<'a> YUVCompatiable for YUVImage<'a>{
+impl<'a> YuvCompatible for YUVImage<'a>{
     fn y_row(&self, at:usize)->&[u8]{
         return self.plane_y.row(at);
     }
@@ -169,36 +206,6 @@ impl<'a> YUVImage<'a>{
     pub fn iter(&self)->YUVImageIter<'_>{
         YUVImageIter::new(self)
     }
-    pub fn write_yuv<Read:Iterator<Item=YUV>>(&mut self,mut reader: Read)->bool{
-        for i in 0..self.height as usize{
-            let row_y = self.plane_y.row_mut(i);
-            let row_u = self.plane_u.row_mut(i >> self.chroma_shift_y);
-            let row_v = self.plane_v.row_mut(i >> self.chroma_shift_y);
-            let (row_y, row_u, row_v) = match (row_y, row_u, row_v){
-                (Some(y), Some(u), Some(v))=>{
-                    u.iter_mut().for_each(|item| *item = 0u8);
-                    v.iter_mut().for_each(|item| *item = 0u8);
-                    y.iter_mut().for_each(|item| *item = 0u8);
-                    (y, u, v)
-                },
-                _=>return false
-            };
-            let max_bits=(1 << self.depth) - 1;
-            let max = max_bits as f32;
-            for j in 0..self.width as usize{
-                let yuv = match reader.next(){
-                    Some(yuv)=>yuv,
-                    None=>return false
-                };
-                let u = j >> (self.chroma_shift_x as usize);
-                let v = j >> (self.chroma_shift_x as usize);
-                row_y[j] = (yuv.y * max) as u8;
-                row_u[u] += (yuv.u * max) as  u8 / 2;
-                row_v[v] += (yuv.v * max) as  u8 / 2;
-            }
-        }
-        return true;
-    }
     pub fn write_yuv16<Read:Iterator<Item=YUV>>(&mut self,mut reader: Read)->bool{
         for i in 0..self.height as usize{
             let row_y = self.plane_y.row_mut(i);
@@ -231,11 +238,11 @@ impl<'a> YUVImage<'a>{
     }
 } 
 pub struct YUVImageIter<'a>{
-    reader:&'a dyn YUVCompatiable,
+    reader:&'a dyn YuvCompatible,
     index:usize
 }
 impl<'a> YUVImageIter<'a>{
-    fn new(reader:&'a YUVCompatiable)->Self{
+    fn new(reader:&'a dyn YuvCompatible)->Self{
         Self{
             reader:reader,
             index:0
