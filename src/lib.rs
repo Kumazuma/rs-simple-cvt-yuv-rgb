@@ -90,10 +90,18 @@ impl<'a> Plane<'a>{
         };
         let start = at * stride as usize;
         let end =  (at + 1) * stride as usize;
+        
         unsafe{
+            let end = if data.len() < end{
+                data.len()
+            }
+            else{
+                end
+            };
             let row = &mut data[start..end];
             let len = row.len();
             let len = len / (std::mem::size_of::<T>()/std::mem::size_of::<u8>());
+            
             Some(&mut std::mem::transmute::<_,&mut [T]>(row)[0..len])
         }
     }
@@ -109,15 +117,63 @@ pub struct YUVImage<'a>
     height:u32,
     depth:u32
 }
+pub trait YUVCompatiable{
+    fn y_row(&self, at:usize)->&[u8];
+    fn y_row_mut(&mut self, at:usize)->&mut [u8];
+    fn u_row(&self, at:usize)->&[u8];
+    fn u_row_mut(&mut self, at:usize)->&mut [u8];
+    fn v_row(&self, at:usize)->&[u8];
+    fn v_row_mut(&mut self, at:usize)->&mut [u8];
+    fn chroma_shift_x(&self)->u8;
+    fn chroma_shift_y(&self)->u8;
+    fn depth(&self)->u8;
+    fn width(&self)->usize;
+    fn height(&self)->usize;
+}
+impl<'a> YUVCompatiable for YUVImage<'a>{
+    fn y_row(&self, at:usize)->&[u8]{
+        return self.plane_y.row(at);
+    }
+    fn y_row_mut(&mut self, at:usize)->&mut [u8]{
+        return self.plane_y.row_mut(at).unwrap();
+    }
+    fn u_row(&self, at:usize)->&[u8]{
+        return self.plane_u.row(at);
+    }
+    fn u_row_mut(&mut self, at:usize)->&mut [u8]{
+        return self.plane_u.row_mut(at).unwrap();
+    }
+    fn v_row(&self, at:usize)->&[u8]{
+        return self.plane_v.row(at)
+    }
+    fn v_row_mut(&mut self, at:usize)->&mut [u8]{
+        return self.plane_v.row_mut(at).unwrap();
+    }
+    fn chroma_shift_x(&self)->u8{
+        return self.chroma_shift_x;
+    }
+    fn chroma_shift_y(&self)->u8{
+        return self.chroma_shift_y;
+    }
+    fn depth(&self)->u8{
+        return self.depth as u8;
+    }
+    fn width(&self)->usize{
+        return self.width as usize;
+    }
+    fn height(&self)->usize{
+        return self.height as usize;
+    }
+}
 impl<'a> YUVImage<'a>{
-    pub fn iter(&self)->YUVImageIter<'_, 'a>{
+    pub fn iter(&self)->YUVImageIter<'_>{
         YUVImageIter::new(self)
     }
     pub fn write_yuv<Read:Iterator<Item=YUV>>(&mut self,mut reader: Read)->bool{
         for i in 0..self.height as usize{
             let row_y = self.plane_y.row_mut(i);
-            let row_u = self.plane_u.row_mut(i << self.chroma_shift_y);
-            let row_v = self.plane_v.row_mut(i << self.chroma_shift_y);
+            let row_u = self.plane_u.row_mut(i >> self.chroma_shift_y);
+            let row_v = self.plane_v.row_mut(i >> self.chroma_shift_y);
             let (row_y, row_u, row_v) = match (row_y, row_u, row_v){
                 (Some(y), Some(u), Some(v))=>{
                     u.iter_mut().for_each(|item| *item = 0u8);
@@ -134,11 +190,11 @@ impl<'a> YUVImage<'a>{
                     Some(yuv)=>yuv,
                     None=>return false
                 };
-                let u = j << self.chroma_shift_x;
-                let v = j << self.chroma_shift_x;
+                let u = j >> (self.chroma_shift_x as usize);
+                let v = j >> (self.chroma_shift_x as usize);
                 row_y[j] = (yuv.y * max) as u8;
-                row_u[u] += (yuv.v * max) as  u8 / 2;
-                row_v[v] += (yuv.u * max) as  u8 / 2;
+                row_u[u] += (yuv.u * max) as  u8 / 2;
+                row_v[v] += (yuv.v * max) as  u8 / 2;
             }
         }
         return true;
@@ -174,43 +230,49 @@ impl<'a> YUVImage<'a>{
         return true;
     }
 } 
-pub struct YUVImageIter<'b, 'a:'b>{
-    reader:&'b YUVImage<'a>,
+pub struct YUVImageIter<'a>{
+    reader:&'a dyn YUVCompatiable,
     index:usize
 }
-impl<'b, 'a:'b> YUVImageIter<'b, 'a>{
-    fn new(reader:&'b YUVImage<'a>)->Self{
+impl<'a> YUVImageIter<'a>{
+    fn new(reader:&'a YUVCompatiable)->Self{
         Self{
             reader:reader,
             index:0
         }
     }
 }
-impl<'b, 'a:'b> Iterator for YUVImageIter<'b, 'a>{
+impl<'a> Iterator for YUVImageIter<'a>{
     type Item = YUV;
     fn next(&mut self)->Option<Self::Item>{
-        if self.index >= (self.reader.height * self.reader.width) as usize{
+        if self.index >= (self.reader.height() * self.reader.width()){
             None
         }
         else{
-            let row = self.index / self.reader.width as usize;
-            let col = self.index % self.reader.width as usize;
+            let row = self.index / self.reader.width();
+            let col = self.index % self.reader.width();
             self.index += 1;
 
-            let depth = ((1 << self.reader.depth) - 1) as f32;
+            let depth = ((1 << self.reader.depth()) - 1) as f32;
             
-            let shift_x = self.reader.chroma_shift_x;
-            let shift_y = self.reader.chroma_shift_y;
-            let (y, u, v) = if self.reader.depth > 8{
-                (self.reader.plane_y.row::<u16>(row)[col] as f32,
-                self.reader.plane_u.row::<u16>(row>>shift_y)[col>>shift_x] as f32,
-                self.reader.plane_v.row::<u16>(row>>shift_y)[col>>shift_x] as f32)
+            let shift_x = self.reader.chroma_shift_x();
+            let shift_y = self.reader.chroma_shift_y();
+            let (y, u, v) = if self.reader.depth() > 8{
+                fn to_u16_arr(arr:&[u8])->&[u16]{unsafe{
+                    &std::mem::transmute::<_,&[u16]>(arr)[0..arr.len()/2]
+                }}
+                (
+                    to_u16_arr(self.reader.y_row(row))[col] as f32,
+                    to_u16_arr(self.reader.u_row(row>>shift_y))[col>>shift_x] as f32,
+                    to_u16_arr(self.reader.v_row(row>>shift_y))[col>>shift_x] as f32
+                )
             }
             else{
                 (
-                self.reader.plane_y.row::<u8>(row)[col] as f32,
-                self.reader.plane_u.row::<u8>(row>>shift_y)[col>>shift_x] as f32,
-                self.reader.plane_v.row::<u8>(row>>shift_y)[col>>shift_x] as f32)
+                    self.reader.y_row(row)[col] as f32,
+                    self.reader.u_row(row>>shift_y)[col>>shift_x] as f32,
+                    self.reader.v_row(row>>shift_y)[col>>shift_x] as f32
+                )
             };
             let cy = y / depth ;
             let cu = u / depth - 0.5;
@@ -219,6 +281,7 @@ impl<'b, 'a:'b> Iterator for YUVImageIter<'b, 'a>{
         }
     }
 }
+
 pub struct YUVImageBuilder<'a>{
     plane_y:Option<Plane<'a>>,
     plane_u:Option<Plane<'a>>,
